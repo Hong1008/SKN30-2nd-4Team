@@ -17,7 +17,7 @@ feature_table_v2.csv
 
 [메타]   genre, rating_encoded, is_korean, runtime
 [시간]   open_month, open_day_of_week, is_summer, is_winter,
-         is_holiday_release, holiday_nearby_count
+         is_holiday_release, holiday_nearby_count, is_peak_season
 [스타]   director_avg_audi, director_movie_count,
          lead_actor_avg_audi, lead_actor_movie_count, cast_max_star_power
 [브랜드] distributor_avg_audi, distributor_movie_count,
@@ -25,9 +25,10 @@ feature_table_v2.csv
 [경쟁]   same_week_releases, market_avg_audi_7d
 [트렌드] trend_pre7_avg, trend_pre7_max, trend_growth_rate,
          relative_search_share
+[환경]   ticket_price_pre30, is_covid_period
 ─────────────────────────────────────────────────────────────────────────────
-총 31개 컬럼 (식별자 2개, 타겟 3개, 원본 피처 26개)
-→ 전처리 후: 삭제 7개 + 신규 4개(is_new_*) = 최종 피처 23개
+총 34개 컬럼 (식별자 2개, 타겟 3개, 원본 피처 29개)
+→ 전처리 후: 삭제 7개 + 신규 4개(is_new_*) + 추가 3개(외생/시즌) = 최종 피처 26개
 ```
 
 ---
@@ -46,7 +47,7 @@ feature_table_v2.csv
 | `producer_movie_count` | 상관계수 $+0.068$. `producer_avg_audi`로 충분 |
 | `rating_encoded` (순서형) | 상관계수 $+0.007$. 순서형 인코딩은 의미 없음. **원-핫 인코딩으로 변환** |
 
-### 신규 피처 (4개) — 기존 피처 보강
+### 신규 피처 (7개) — 기존 피처 보강 및 외생/시즌 변수 추가
 
 | 신규 피처 | 산출 방법 | 의미 |
 |:---|:---|:---|
@@ -54,6 +55,9 @@ feature_table_v2.csv
 | `is_new_lead` | `lead_actor_avg_audi == 0` → 1 | 신인 주연배우 여부 |
 | `is_new_distributor` | `distributor_avg_audi == 0` → 1 | 신생 배급사 여부 |
 | `is_new_producer` | `producer_avg_audi == 0` → 1 | 신생 제작사 여부 |
+| `ticket_price_pre30` | 개봉 직전 30일 간 극장 `total_sales / total_audi` 평균 | 개봉 시점의 티켓 단가 수준 (인플레이션 반영) |
+| `is_covid_period` | 개봉일이 `2020-02-01` ~ `2022-03-31` 구간이면 1 | 사회적 거리두기 및 극장 영업제한 침체기 여부 |
+| `is_peak_season` | 개봉월이 12, 1, 7, 8월에 해당하면 1 | 여름/겨울 방학 및 연말연시 극성수기 여부 |
 
 ---
 
@@ -176,12 +180,49 @@ relative_search_share = pre30_avg / top5_sum
 
 ---
 
-## 4. 전처리 파이프라인 구현 코드
+## 4. 외생 지표 및 극장 환경 피처 (3개)
+
+대중적 관심(검색 트렌드)이나 역사적 실적(스타/브랜드 파워) 외에, 개봉 시점의 **경제적 상황 및 외부 극장 시장 환경**을 모델에 통합하기 위해 설계된 변수입니다.
+
+### 4-1. `ticket_price_pre30` (개봉 직전 30일 평균 관람료)
+* **도입 근거**: 영화 티켓 가격은 시간의 흐름에 따라 지속적으로 상승(인플레이션)해 왔으며, 이는 최종 매출액 및 스케일이 다른 연도의 관객수 예측 모델에 영향을 미치는 주요 외생 변수입니다. 개봉 시점의 실질 티켓 가격 수준을 대변합니다.
+* **산출 방법**:
+  1. 극장 일별 전체 매출(`total_sales`)과 총 관객수(`total_audi`)를 나누어 일별 평균 관람료(`ticket_price = total_sales / total_audi`)를 구합니다. (결측일은 직전 값으로 ffill)
+  2. 개봉 직전 30일(D-30 ~ D-1) 동안의 `ticket_price` 평균값을 최종 할당합니다. (결측치는 전체 median 대체)
+
+### 4-2. `is_covid_period` (코로나19 침체기 여부)
+* **도입 근거**: 코로나19 확산기에는 사회적 거리두기, 영업 제한 등으로 인해 극장 관객이 코로나 이전 대비 **평균 64% 급감**했습니다. 개봉일이 이 특수 침체 구간에 들어가는지를 통제(Control Variable)하여 모델의 예측 오차를 보정합니다.
+* **적용 범위**: `2020-02-01` ~ `2022-03-31` (실외 마스크 착용 해제 및 전면 거리두기 완화 시점)
+
+### 4-3. `is_peak_season` (극성수기 개봉 여부)
+* **도입 근거**: 연간 박스오피스 역사적 통계상 여름방학 시즌(7, 8월)과 겨울방학/연말연시 시즌(12, 1월)은 평달 대비 평균 관객수가 **약 1.6~1.8배** 폭증하는 극성수기(Peak Season)입니다. 해당 계절적 영향(Seasonality)을 통제합니다.
+* **적용 범위**: 개봉 월이 `[12, 1, 7, 8]` 월에 해당하는지 여부를 이진화(0 또는 1)하여 반영합니다.
+
+---
+
+## 5. 전처리 파이프라인 구현 코드
 
 ```python
 # ── [0] 학습 범위 필터: 2016년 이후만 학습 대상 ──
 df['open_date'] = pd.to_datetime(df['open_date'], errors='coerce')
 df['open_year'] = df['open_date'].dt.year
+
+# ── [신규] 코로나 / 극성수기 / 일별 관람료 피처 사전 생성 ──
+# (1) 코로나 침체기 여부 생성 (거리두기 구간)
+COVID_START = pd.Timestamp('2020-02-01')
+COVID_END   = pd.Timestamp('2022-03-31')
+df['is_covid_period'] = ((df['open_date'] >= COVID_START) & (df['open_date'] <= COVID_END)).astype(int)
+
+# (2) 계절 극성수기 여부 생성 (여름/겨울 방학)
+df['is_peak_season'] = df['open_date'].dt.month.isin({12, 1, 7, 8}).astype(int)
+
+# (3) 개봉 직전 30일 평균 관람료 계산 (ticket_price_pre30)
+# df_market_price에 target_date, ticket_price(sales/audi)가 사전에 구축되었다고 가정
+df['ticket_price_pre30'] = df['open_date'].apply(
+    lambda d: get_ticket_price_pre30(d, df_market_price)
+)
+df['ticket_price_pre30'] = df['ticket_price_pre30'].fillna(df['ticket_price_pre30'].median())
+
 df_train = df[df['open_year'] >= 2016].reset_index(drop=True)
 
 # ── 피처/타겟 분리 ──
